@@ -169,7 +169,8 @@ dl.det dd{margin:0}
 var OWNER_UID='GdDJpO2rTneHxVRG5NhmfakOhrB2';
 var FB_CONFIG={apiKey:"AIzaSyAaFoYefcJLaBMlD4Ft9qhLslbuHGm7xVs",authDomain:"cotizador-r-y-n.firebaseapp.com",projectId:"cotizador-r-y-n",storageBucket:"cotizador-r-y-n.firebasestorage.app",messagingSenderId:"732030961262",appId:"1:732030961262:web:1d56b786de81844263c87f"};
 var DEMO=/[?&]demo\b/.test(location.search);
-var C={docs:'conta_docs',movs:'conta_movs',cartolas:'conta_cartolas',cierres:'conta_cierres',obs:'conta_obs',lectores:'conta_lectores',log:'conta_log',files:'conta_files'};
+var C={docs:'conta_docs',movs:'conta_movs',cartolas:'conta_cartolas',cierres:'conta_cierres',obs:'conta_obs',lectores:'conta_lectores',log:'conta_log',files:'conta_files',invites:'conta_invites'};
+var INV=(location.search.match(/[?&]invitacion=([A-Za-z0-9_-]{20,64})/)||[])[1]||null;
 var INACTIVIDAD_MIN=30;
 var RET_HONORARIOS=0.1525; /* retencion boletas de honorarios 2026 */
 
@@ -262,7 +263,7 @@ var urlCache={};
 async function fileUrl(path){if(urlCache[path])return urlCache[path];var blob=await (await fetch(await ST.fileDataUrl(path))).blob();urlCache[path]=URL.createObjectURL(blob);return urlCache[path];}
 
 /* ---------- estado ---------- */
-var S={user:null,rol:null,nombre:'',per:mesActual(),tab:'resumen',docs:[],movs:[],cartolas:[],cierres:{},obs:[],lectores:[],log:[],loading:false,movFiltro:'todos',docFiltro:'todos',q:'',demoRol:'owner'};
+var S={user:null,rol:null,nombre:'',per:mesActual(),tab:'resumen',docs:[],movs:[],cartolas:[],cierres:{},obs:[],lectores:[],log:[],loading:false,movFiltro:'todos',docFiltro:'todos',q:'',demoRol:'owner',invites:[],inv:null,claiming:false};
 function esDueno(){return S.rol==='owner';}
 function enPer(mes){if(!mes)return false;return S.per.length===4?mes.slice(0,4)===S.per:mes===S.per;}
 function cerrado(mes){return !!S.cierres[mes];}
@@ -292,7 +293,12 @@ async function iniciar(){
   ST=fireStore();
   try{await firebase.auth().setPersistence(firebase.auth.Auth.Persistence.SESSION);}catch(e){}
   firebase.auth().onAuthStateChanged(async function(u){
-    if(!u){S.user=null;S.rol=null;render();return;}
+    if(S.claiming)return;
+    if(!u){S.user=null;S.rol=null;render();if(INV&&!S.inv)cargarInv();return;}
+    await procesarUsuario(u);
+  });
+}
+async function procesarUsuario(u){
     var rol=null,nombre='';
     if(u.uid===OWNER_UID){rol='owner';nombre='Dueño';}
     else{try{var l=await ST.get(C.lectores,u.uid);if(l){rol='lector';nombre=l.nombre||'Contadora';}}catch(e){}}
@@ -301,7 +307,6 @@ async function iniciar(){
     resetInact();
     if(sessionStorage.getItem('conta_log')!==u.uid){try{sessionStorage.setItem('conta_log',u.uid);}catch(e){}ST.add(C.log,{uid:u.uid,email:u.email||'',rol:rol,at:Date.now(),ua:navigator.userAgent.slice(0,200)}).catch(function(){});}
     await cargar();
-  });
 }
 async function entrarDemo(){S.user={uid:S.demoRol==='owner'?OWNER_UID:'DEMO-CONTADORA',email:S.demoRol==='owner'?'dueno@demo':'contadora@demo'};S.rol=S.demoRol;S.nombre=S.demoRol==='owner'?'Dueño':'Contadora (demo)';await cargar();}
 async function login(ev){
@@ -310,6 +315,56 @@ async function login(ev){
   S.loginErr='';btn.disabled=true;btn.textContent='Ingresando…';
   try{await firebase.auth().signInWithEmailAndPassword(em,pw);}
   catch(e){var c=e&&e.code||'';S.loginErr=/too-many/.test(c)?'Demasiados intentos. Espera unos minutos antes de volver a intentar.':/network/.test(c)?'Sin conexión a internet.':'Correo o clave incorrectos.';render();}
+}
+/* ---------- invitacion: la contadora crea su propia cuenta ---------- */
+async function cargarInv(){
+  try{var d=await ST.get(C.invites,INV);
+    if(!d)S.inv={err:'Esta invitación no existe o fue anulada. Pide una nueva.'};
+    else if(d.usado)S.inv={err:'Esta invitación ya fue usada. Si es tuya, ingresa con tu correo y clave.',usada:true};
+    else if(d.expira<Date.now())S.inv={err:'Esta invitación venció. Pide una nueva.'};
+    else S.inv=d;
+  }catch(e){S.inv={err:'No se pudo verificar la invitación. Revisa tu conexión y recarga la página.'};}
+  render();
+}
+function vInvite(){
+  var i=S.inv;
+  var h='<div class="login"><form onsubmit="A.aceptarInv(event)" autocomplete="on"><div class="brand">ELECTROVOLT <span>TEMPLE</span> SPA.</div>';
+  if(!i)return h+'<h1>Verificando invitación…</h1><span class="spin"></span></form></div>';
+  if(i.err)return h+'<h1>Invitación</h1><div class="alert '+(i.usada?'a-info':'a-bad')+'">'+esc(i.err)+'</div><a class="btn pri" style="width:100%;justify-content:center" href="'+esc(location.pathname)+'">Ir a ingresar</a></form></div>';
+  h+='<h1>Hola <b>'+esc(i.nombre)+'</b>: crea tu acceso a la contabilidad (solo lectura).</h1>'
+    +'<div class="fg"><label class="f" for="iv-email">Tu correo</label><input id="iv-email" type="email" autocomplete="username" required></div>'
+    +'<div class="fg"><label class="f" for="iv-p1">Elige una clave</label><input id="iv-p1" type="password" autocomplete="new-password" minlength="10" required><span class="small muted">Mínimo 10 caracteres, con letras y números.</span></div>'
+    +'<div class="fg"><label class="f" for="iv-p2">Repite la clave</label><input id="iv-p2" type="password" autocomplete="new-password" required></div>'
+    +(S.invErr?'<div class="alert a-bad">'+esc(S.invErr)+'</div>':'')
+    +'<button id="iv-btn" class="btn pri" style="width:100%;justify-content:center;padding:11px">Crear mi cuenta</button>'
+    +'<p class="small muted" style="margin:14px 0 0">Si ya tienes una cuenta con ese correo, escribe tu clave actual y quedará vinculada. Esta invitación sirve una sola vez.</p></form></div>';
+  return h;
+}
+async function aceptarInv(ev){
+  ev.preventDefault();
+  var em=document.getElementById('iv-email').value.trim(),p1=document.getElementById('iv-p1').value,p2=document.getElementById('iv-p2').value;
+  S.invErr='';
+  if(p1.length<10||!/[A-Za-zÁÉÍÓÚáéíóúñÑ]/.test(p1)||!/\d/.test(p1)){S.invErr='La clave debe tener al menos 10 caracteres, con letras y números.';render();return;}
+  if(p1!==p2){S.invErr='Las claves no coinciden.';render();return;}
+  var btn=document.getElementById('iv-btn');btn.disabled=true;btn.textContent='Creando cuenta…';
+  S.claiming=true;
+  try{
+    var cred;
+    try{cred=await firebase.auth().createUserWithEmailAndPassword(em,p1);}
+    catch(e){if(e&&e.code==='auth/email-already-in-use')cred=await firebase.auth().signInWithEmailAndPassword(em,p1);else throw e;}
+    var u=cred.user,db=firebase.firestore(),b=db.batch();
+    b.set(db.collection(C.lectores).doc(u.uid),{nombre:S.inv.nombre,email:em,agregado:Date.now(),invite:INV});
+    b.update(db.collection(C.invites).doc(INV),{usado:true,usadoPor:u.uid,usadoAt:Date.now()});
+    await b.commit();
+    history.replaceState(null,'',location.pathname);INV=null;S.claiming=false;
+    await procesarUsuario(u);
+    toast('¡Listo! Tu cuenta quedó creada. La próxima vez entra con tu correo y clave.');
+  }catch(e){
+    S.claiming=false;try{await firebase.auth().signOut();}catch(x){}
+    var c=e&&e.code||'';
+    S.invErr=/invalid-email/.test(c)?'El correo no es válido.':/weak-password/.test(c)?'La clave es muy débil.':/wrong-password|invalid-credential|invalid-login/.test(c)?'Ese correo ya tiene una cuenta y la clave no coincide.':/too-many/.test(c)?'Demasiados intentos. Espera unos minutos.':/permission/.test(c+(e&&e.message))?'La invitación ya no es válida (usada, anulada o vencida).':'No se pudo crear la cuenta: '+errMsg(e);
+    render();
+  }
 }
 async function olvido(){
   var em=document.getElementById('lg-email').value.trim();
@@ -324,7 +379,7 @@ async function cargar(){
   try{
     var r=await Promise.all([ST.list(C.docs),ST.list(C.movs),ST.list(C.cartolas),ST.list(C.cierres),ST.list(C.obs)]);
     S.docs=r[0];S.movs=r[1];S.cartolas=r[2];S.cierres={};r[3].forEach(function(c){S.cierres[c.id]=c;});S.obs=r[4];
-    if(esDueno()){var r2=await Promise.all([ST.list(C.lectores),ST.list(C.log,{order:'at',limit:60})]);S.lectores=r2[0];S.log=r2[1].sort(function(a,b){return b.at-a.at;});}
+    if(esDueno()){var r2=await Promise.all([ST.list(C.lectores),ST.list(C.log,{order:'at',limit:60}),ST.list(C.invites)]);S.lectores=r2[0];S.invites=r2[2];S.log=r2[1].sort(function(a,b){return b.at-a.at;});}
   }catch(e){toast('No se pudieron cargar los datos: '+errMsg(e),true);}
   S.loading=false;render();
 }
@@ -332,7 +387,7 @@ async function cargar(){
 /* ---------- render principal ---------- */
 function render(){
   var app=document.getElementById('app');
-  if(!S.user){app.innerHTML=vLogin();return;}
+  if(!S.user){app.innerHTML=INV&&!DEMO?vInvite():vLogin();return;}
   var nObs=obsAbiertas().length;
   var tabs=[['resumen','Resumen'],['banco','Banco'],['gastos','Gastos'],['ingresos','Ingresos'],['cartolas','Cartolas'],['obs','Observaciones'+(nObs?'<span class="n">'+nObs+'</span>':'')]];
   if(esDueno())tabs.push(['accesos','Accesos']);
@@ -790,9 +845,13 @@ async function guardarObs(t,id){
 function vAccesos(){
   var h='<div class="sec-h"><h2>Accesos</h2></div>';
   h+='<div class="grid g2"><div class="card"><h3>Personas con acceso de solo lectura</h3>';
-  h+=S.lectores.length?S.lectores.map(function(l){return '<div class="cand"><div><b>'+esc(l.nombre||'')+'</b><div class="small muted">'+esc(l.email||'')+' · UID '+esc(l.id)+'</div></div><button class="btn sm danger" onclick="A.quitarLector(\''+l.id+'\')">Quitar acceso</button></div>';}).join(''):'<div class="muted small">Aún no hay nadie. Agrega a tu contadora con los pasos de la derecha.</div>';
-  h+='</div><div class="card"><h3>Dar acceso a la contadora</h3><ol class="small" style="padding-left:18px;margin-top:0"><li>Entra a <a href="https://console.firebase.google.com/project/cotizador-r-y-n/authentication/users" target="_blank" rel="noopener">Firebase → Authentication → Usuarios</a> y presiona <b>Agregar usuario</b> con el correo de la contadora y una clave segura (12+ caracteres).</li><li>Copia el <b>UID</b> que aparece en la lista y pégalo aquí.</li><li>Envíale la dirección de esta página y la clave por un canal distinto (por ejemplo, la dirección por correo y la clave por teléfono).</li></ol>'
-    +'<div class="fg"><label class="f" for="ac-uid">UID</label><input id="ac-uid" type="text" maxlength="128"></div><div class="grid g2"><div class="fg"><label class="f" for="ac-nom">Nombre</label><input id="ac-nom" type="text" maxlength="80" placeholder="Ej.: María (contadora)"></div><div class="fg"><label class="f" for="ac-em">Correo</label><input id="ac-em" type="email" maxlength="200"></div></div><button class="btn pri" onclick="A.agregarLector()">Dar acceso de solo lectura</button></div></div>';
+  h+=S.lectores.length?S.lectores.map(function(l){return '<div class="cand"><div><b>'+esc(l.nombre||'')+'</b><div class="small muted">'+esc(l.email||'')+' · UID '+esc(l.id)+'</div></div><button class="btn sm danger" onclick="A.quitarLector(\''+l.id+'\')">Quitar acceso</button></div>';}).join(''):'<div class="muted small">Aún no hay nadie. Invita a tu contadora con el formulario de la derecha.</div>';
+  var pend=S.invites.filter(function(i){return !i.usado&&i.expira>Date.now();});
+  h+='</div><div class="card"><h3>Invitar a la contadora</h3><p class="small muted" style="margin-top:0">Ella crea su propia cuenta con el correo y la clave que quiera. El enlace sirve <b>una sola vez</b>, vence en <b>7 días</b> y solo da permiso de <b>ver</b>.</p>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap"><input id="ac-nom" type="text" maxlength="80" placeholder="Nombre, ej.: Luz" style="flex:1;min-width:160px"><button class="btn pri" onclick="A.crearInv()">Crear invitación</button></div>';
+  if(S.ultimoLink)h+='<div class="alert a-ok" style="word-break:break-all">Envíale este enlace:<br><b>'+esc(S.ultimoLink)+'</b><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn sm" onclick="A.copiarLink()">📋 Copiar</button><a class="btn sm" target="_blank" rel="noopener" href="https://wa.me/?text='+encodeURIComponent('Hola, este es tu acceso a la contabilidad de ELECTROVOLT TEMPLE SPA. Crea tu cuenta aquí (el enlace sirve una sola vez): '+S.ultimoLink)+'">💬 Enviar por WhatsApp</a></div></div>';
+  if(pend.length)h+='<h4 style="margin:14px 0 4px">Invitaciones sin usar</h4>'+pend.map(function(i){return '<div class="cand"><div><b>'+esc(i.nombre)+'</b><div class="small muted">Vence el '+new Date(i.expira).toLocaleDateString('es-CL')+'</div></div><button class="btn sm danger" onclick="A.anularInv(\''+i.id+'\')">Anular</button></div>';}).join('');
+  h+='</div></div>';
   h+='<div class="card" style="margin-top:14px"><h3>Últimos ingresos al sistema</h3>'+(S.log.length?'<div class="tw" style="border:0"><table><thead><tr><th>Fecha</th><th>Quién</th><th class="hide-m">Dispositivo</th></tr></thead><tbody>'+S.log.slice(0,40).map(function(l){return '<tr style="cursor:default"><td class="num">'+new Date(l.at).toLocaleString('es-CL',{dateStyle:'short',timeStyle:'short'})+'</td><td>'+esc(l.rol==='owner'?'Dueño':(l.email||l.uid))+'</td><td class="hide-m small muted"><span class="trunc" style="display:block;max-width:420px">'+esc(l.ua||'')+'</span></td></tr>';}).join('')+'</tbody></table></div>':'<div class="muted small">Sin registros todavía.</div>')+'</div>';
   return h;
 }
@@ -867,6 +926,13 @@ var A={
     if(!/^[A-Za-z0-9]{20,128}$/.test(uid))return toast('El UID no parece válido: cópialo tal cual desde Firebase.',true);if(uid===OWNER_UID)return toast('Ese es tu propio UID.',true);if(!nom)return toast('Escribe un nombre.',true);
     try{var rec={nombre:nom,email:em,agregado:Date.now()};await ST.set(C.lectores,uid,rec);rec.id=uid;S.lectores=S.lectores.filter(function(l){return l.id!==uid;}).concat([rec]);render();toast('Acceso de solo lectura otorgado a '+nom+'.');}catch(e){toast(errMsg(e),true);}},
   quitarLector:async function(uid){if(!soloDueno()||!confirm('¿Quitar el acceso? Esa persona ya no podrá ver nada.'))return;try{await ST.del(C.lectores,uid);S.lectores=S.lectores.filter(function(l){return l.id!==uid;});render();toast('Acceso quitado.');}catch(e){toast(errMsg(e),true);}},
+  aceptarInv:aceptarInv,
+  crearInv:async function(){if(!soloDueno())return;var nom=document.getElementById('ac-nom').value.trim();if(!nom)return toast('Escribe el nombre de la persona.',true);
+    var a=crypto.getRandomValues(new Uint8Array(24)),code=btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    var rec={nombre:nom.slice(0,80),creado:Date.now(),expira:Date.now()+7*864e5,usado:false};
+    try{await ST.set(C.invites,code,rec);rec.id=code;S.invites.push(rec);S.ultimoLink=location.origin+location.pathname+'?invitacion='+code;render();}catch(e){toast(errMsg(e),true);}},
+  copiarLink:function(){try{navigator.clipboard.writeText(S.ultimoLink).then(function(){toast('Enlace copiado.');},function(){toast('No se pudo copiar: selecciónalo y cópialo a mano.',true);});}catch(e){toast('Selecciona el enlace y cópialo a mano.',true);}},
+  anularInv:async function(id){if(!soloDueno()||!confirm('¿Anular esta invitación? El enlace dejará de funcionar.'))return;try{await ST.del(C.invites,id);S.invites=S.invites.filter(function(i){return i.id!==id;});if(S.ultimoLink&&S.ultimoLink.indexOf(id)>=0)S.ultimoLink='';render();}catch(e){toast(errMsg(e),true);}},
   cerrarModal:cerrarModal
 };
 

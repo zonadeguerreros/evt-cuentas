@@ -279,7 +279,10 @@ var EST_MOV={ok:['b-ok','Respaldado'],parcial:['b-info','Respaldo parcial'],nota
 function obsAbiertas(refTipo,refId){return S.obs.filter(function(o){return !o.resuelta&&(!refTipo||(o.refTipo===refTipo&&o.refId===refId));});}
 function movById(id){for(var i=0;i<S.movs.length;i++)if(S.movs[i].id===id)return S.movs[i];return null;}
 function docById(id){for(var i=0;i<S.docs.length;i++)if(S.docs[i].id===id)return S.docs[i];return null;}
-function ordenFecha(a,b){return (b.fecha||'').localeCompare(a.fecha||'')||((a.orden||0)-(b.orden||0));}
+function seqMov(m){return m.cron!=null?m.cron:-(m.orden||0);}
+function ordenFecha(a,b){return (b.fecha||'').localeCompare(a.fecha||'')||(a.cron!=null||b.cron!=null?seqMov(b)-seqMov(a):(a.orden||0)-(b.orden||0));}
+/* saldo del banco al final del periodo = saldo del ultimo movimiento (por fecha y orden cronologico) */
+function saldoFinal(movs){var u=null;movs.forEach(function(m){if(m.saldo==null||m.saldo==='')return;if(!u||m.fecha>u.fecha||(m.fecha===u.fecha&&seqMov(m)>seqMov(u)))u=m;});return u;}
 
 /* ---------- autenticacion ---------- */
 var inactTimer=null;
@@ -437,7 +440,7 @@ function calc(){
   var g=docs.filter(function(d){return d.tipo==='gasto';}),i=docs.filter(function(d){return d.tipo==='ingreso';});
   function sum(a,f){return a.reduce(function(s,x){return s+f(x);},0);}
   var R={g:g,i:i,movs:movs,totG:sum(g,totalDoc),totI:sum(i,totalDoc),ivaC:sum(g,ivaDoc),ivaD:sum(i,ivaDoc),retH:sum(g,function(d){return d.docTipo==='bh'?(+d.retencion||0):0;})};
-  R.cargos=sum(movs,function(m){return +m.cargo||0;});R.abonos=sum(movs,function(m){return +m.abono||0;});
+  R.saldoFin=saldoFinal(movs);R.cargos=sum(movs,function(m){return +m.cargo||0;});R.abonos=sum(movs,function(m){return +m.abono||0;});
   ['cargo','abono'].forEach(function(k){
     var ms=movs.filter(function(m){return (+m[k]||0)>0;}),o={doc:0,nota:0,falta:0,nFalta:0,parcial:0};
     ms.forEach(function(m){var e=movEstado(m,idx),v=+m[k];if(e==='ok')o.doc+=v;else if(e==='parcial'){var s=Math.min(v,Math.abs((idx[m.id]||[]).reduce(function(a,d){return a+pagadoDoc(d);},0)));o.doc+=s;o.falta+=v-s;o.parcial++;}else if(e==='nota')o.nota+=v;else{o.falta+=v;o.nFalta++;}});
@@ -468,6 +471,7 @@ function vResumen(){
   else h+='<div class="alert a-warn">⚠️ Hay <b>'+pendientes+'</b> movimiento'+(pendientes===1?'':'s')+' del banco sin respaldo'+(R.cargo.parcial+R.abono.parcial?' y '+(R.cargo.parcial+R.abono.parcial)+' con respaldo parcial':'')+'. <a href="#" onclick="A.verFaltantes();return false">Ver cuáles</a></div>';
   h+='<div class="grid g2" style="margin-bottom:14px">';
   h+='<div class="card"><h3>Cuadre de salidas (cargos del banco)</h3>'
+    +(R.saldoFin?'<div class="small muted" style="margin:-6px 0 8px">Saldo de la cuenta al '+fFecha(R.saldoFin.fecha)+': <b style="color:var(--ink)">'+$$(R.saldoFin.saldo)+'</b></div>':'')
     +cRow('Total cargos en la cartola',$$(R.cargos),true)
     +cRow('Con comprobante',$$(R.cargo.doc))
     +cRow('Justificados sin comprobante',$$(R.cargo.nota))
@@ -600,7 +604,18 @@ function filasImport(){
     var key=[fecha,desc,ndoc,cargo,abono,isNaN(sal)?'':sal].join('|');occ[key]=(occ[key]||0)+1;
     out.push({id:'M'+hash53(key+'#'+occ[key]),fecha:fecha,mes:fecha.slice(0,7),desc:desc||'(sin descripción)',ndoc:ndoc,cargo:cargo,abono:abono,saldo:isNaN(sal)?null:sal,orden:r,archivo:IMP.file,importado:Date.now()});
   }
-  return {filas:out,errores:errores};
+  /* Cadena de saldos: cada saldo debe ser el anterior + abono - cargo. Se prueba el archivo en ambos
+     sentidos (Santander lista del mas nuevo al mas antiguo) y se usa el que cuadra. */
+  function quiebres(seq){var n=0;for(var i=1;i<seq.length;i++){var a=seq[i-1],b=seq[i];if(a.saldo!=null&&b.saldo!=null&&a.saldo+b.abono-b.cargo!==b.saldo)n++;}return n;}
+  var conSaldo=out.filter(function(f){return f.saldo!=null;}).length,cad=null;
+  if(out.length){
+    var inv=out.slice().reverse(),qi=quiebres(inv),qd=quiebres(out);
+    var desc=out[0].fecha>out[out.length-1].fecha||(out[0].fecha===out[out.length-1].fecha&&qi<=qd);
+    var seq=(qi!==qd)?(qi<qd?inv:out):(desc?inv:out);
+    seq.forEach(function(f,i){f.cron=i;});
+    if(conSaldo===out.length){var pri=seq[0],ult=seq[seq.length-1];cad={quiebres:Math.min(qi,qd),ini:pri.saldo-pri.abono+pri.cargo,fin:ult.saldo};}
+  }
+  return {filas:out,errores:errores,cadena:cad};
 }
 function vImport(){
   var hoja=IMP.hojas[IMP.hoja],rows=hoja.rows,ncol=Math.max.apply(null,rows.slice(0,60).map(function(r){return r.length;}).concat([1]));
@@ -618,6 +633,7 @@ function vImport(){
   rows.slice(Math.max(0,IMP.hr),Math.max(0,IMP.hr)+9).forEach(function(r,i){h+='<tr style="cursor:default'+(i===0&&IMP.hr>=0?';font-weight:700;background:#f8f9fc':'')+'">';for(var c=0;c<ncol;c++){var v=r[c];h+='<td>'+esc(v instanceof Date?ymd(new Date(v.getTime()+12*3600e3)):v)+'</td>';}h+='</tr>';});
   h+='</tbody></table></div>';
   var tc=0,ta=0;nuevos.forEach(function(f){tc+=f.cargo;ta+=f.abono;});
+  if(p.cadena)h+=p.cadena.quiebres===0?'<div class="alert a-ok">✅ Los saldos cuadran fila a fila: saldo inicial <b>'+$$(p.cadena.ini)+'</b> → saldo final <b>'+$$(p.cadena.fin)+'</b>. No falta ningún movimiento en este archivo.</div>':'<div class="alert a-warn">⚠️ Hay '+p.cadena.quiebres+' salto'+(p.cadena.quiebres===1?'':'s')+' en los saldos: puede faltar algún movimiento en el archivo o alguna columna está mal asignada.</div>';
   h+=p.filas.length?'<div class="alert a-info">Se encontraron <b>'+p.filas.length+'</b> movimientos'+(p.filas.length?' (del '+fFecha(p.filas.map(function(f){return f.fecha;}).sort()[0])+' al '+fFecha(p.filas.map(function(f){return f.fecha;}).sort().pop())+')':'')+'. Nuevos: <b>'+nuevos.length+'</b> · cargos '+$$(tc)+' · abonos '+$$(ta)+(rep?'<br>'+rep+' ya estaban importados y se omiten.':'')+(bloq?'<br>⚠️ '+bloq+' pertenecen a meses cerrados y no se importarán.':'')+(p.errores?'<br>'+p.errores+' filas con fecha ilegible se omiten.':'')+'</div>':'<div class="alert a-warn">No se reconocen movimientos. Indica qué columna es la <b>Fecha</b> y cuáles son <b>Cargo</b>/<b>Abono</b> (o <b>Monto</b>).</div>';
   h+='</div><div class="mf"><button class="btn" onclick="A.cerrarModal()">Cancelar</button><button class="btn pri" id="imp-ok" onclick="A.impOk()"'+(nuevos.length-bloq>0?'':' disabled')+'>Importar '+(nuevos.length-bloq)+' movimientos</button></div>';
   abrirModal(h,true);
@@ -861,7 +877,7 @@ function exportar(){
   if(typeof XLSX==='undefined')return toast('No se cargó el generador de Excel. Revisa tu internet.',true);
   var R=calc(),idx=porMov(),wb=XLSX.utils.book_new();
   function docRows(ls){return ls.slice().sort(function(a,b){return a.fecha.localeCompare(b.fecha);}).map(function(d){var m=d.movId&&movById(d.movId);return {'Fecha':fFecha(d.fecha),'Tipo documento':DOC_TIPOS[d.docTipo],'Folio':d.folio||'','RUT':d.rut||'','Nombre':d.nombre||'','Categoría':d.categoria||'','Neto':signo(d)*(+d.neto||0),'IVA':ivaDoc(d),'Retención':+d.retencion||0,'Total':totalDoc(d),'Medio de pago':MEDIOS[d.medio]||'','Justificación / detalle':d.justificacion||'','Movimiento banco':m?fFecha(m.fecha)+' '+m.desc:'','Archivos adjuntos':(d.archivos||[]).length};});}
-  var res=[['ELECTROVOLT TEMPLE SPA. · Contabilidad',''],['Período',nomMes(S.per)],['Generado',new Date().toLocaleString('es-CL')],['',''],['Ingresos documentados',R.totI],['Gastos documentados',R.totG],['Resultado',R.totI-R.totG],['',''],['IVA débito',R.ivaD],['IVA crédito',R.ivaC],['IVA a pagar estimado',R.ivaD-R.ivaC],['Retenciones honorarios',R.retH],['',''],['Cargos banco',R.cargos],['  con comprobante',R.cargo.doc],['  justificados sin comprobante',R.cargo.nota],['  sin respaldo',R.cargo.falta],['Abonos banco',R.abonos],['  con documento',R.abono.doc],['  justificados sin documento',R.abono.nota],['  sin respaldo',R.abono.falta]];
+  var res=[['ELECTROVOLT TEMPLE SPA. · Contabilidad',''],['Período',nomMes(S.per)],['Generado',new Date().toLocaleString('es-CL')],['',''],['Ingresos documentados',R.totI],['Gastos documentados',R.totG],['Resultado',R.totI-R.totG],['',''],['IVA débito',R.ivaD],['IVA crédito',R.ivaC],['IVA a pagar estimado',R.ivaD-R.ivaC],['Retenciones honorarios',R.retH],['',''],['Cargos banco',R.cargos],['  con comprobante',R.cargo.doc],['  justificados sin comprobante',R.cargo.nota],['  sin respaldo',R.cargo.falta],['Abonos banco',R.abonos],['  con documento',R.abono.doc],['  justificados sin documento',R.abono.nota],['  sin respaldo',R.abono.falta],['',''],['Saldo cuenta al '+(R.saldoFin?fFecha(R.saldoFin.fecha):'—'),R.saldoFin?R.saldoFin.saldo:'']];
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(res),'Resumen');
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(docRows(R.g).length?docRows(R.g):[{'Sin datos':''}]),'Gastos');
   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(docRows(R.i).length?docRows(R.i):[{'Sin datos':''}]),'Ingresos');

@@ -282,7 +282,13 @@ function docById(id){for(var i=0;i<S.docs.length;i++)if(S.docs[i].id===id)return
 function seqMov(m){return m.cron!=null?m.cron:-(m.orden||0);}
 function ordenFecha(a,b){return (b.fecha||'').localeCompare(a.fecha||'')||(a.cron!=null||b.cron!=null?seqMov(b)-seqMov(a):(a.orden||0)-(b.orden||0));}
 /* saldo del banco al final del periodo = saldo del ultimo movimiento (por fecha y orden cronologico) */
-function saldoFinal(movs){var u=null;movs.forEach(function(m){if(m.saldo==null||m.saldo==='')return;if(!u||m.fecha>u.fecha||(m.fecha===u.fecha&&seqMov(m)>seqMov(u)))u=m;});return u;}
+function saldoFinal(movs){
+  /* ultimo saldo conocido + movimientos posteriores sin saldo (p. ej. los de la cartola historica, que trae saldo solo por dia) */
+  var ord=movs.slice().sort(function(a,b){return a.fecha.localeCompare(b.fecha)||seqMov(a)-seqMov(b);}),k=-1;
+  for(var i=ord.length-1;i>=0;i--)if(ord[i].saldo!=null&&ord[i].saldo!==''){k=i;break;}
+  if(k<0)return null;var sal=+ord[k].saldo;for(var j=k+1;j<ord.length;j++)sal+=(+ord[j].abono||0)-(+ord[j].cargo||0);
+  return {fecha:ord[ord.length-1].fecha,saldo:sal};
+}
 
 /* ---------- autenticacion ---------- */
 var inactTimer=null;
@@ -465,6 +471,8 @@ function vResumen(){
     +kpi('Resultado (ingresos − gastos)','<span class="'+(res<0?'neg':'pos')+'">'+$$(res)+'</span>','Según documentos subidos')
     +kpi('IVA a pagar (estimado)',$$(R.ivaD-R.ivaC),'Débito '+$$(R.ivaD)+' − crédito '+$$(R.ivaC))
     +'</div>';
+  var nRepR=esDueno()?buscarRepetidos().filter(function(r){return enPer(r.queda.mes);}).length:0;
+  if(nRepR)h+='<div class="alert a-bad">⚠️ Hay '+nRepR+' movimiento'+(nRepR===1?'':'s')+' del banco repetido'+(nRepR===1?'':'s')+': los totales del banco salen inflados. <a href="#" onclick="A.tab(\'banco\');A.verRepetidos();return false">Revisar y unificar</a></div>';
   var pendientes=R.cargo.nFalta+R.abono.nFalta;
   if(R.movs.length===0)h+='<div class="alert a-info">Aún no hay movimientos del banco para este período. '+(esDueno()?'Súbelos en la pestaña <b>Banco</b> para poder cuadrar.':'')+'</div>';
   else if(pendientes===0&&R.cargo.parcial+R.abono.parcial===0)h+='<div class="alert a-ok">✅ Todos los movimientos del banco de este período tienen respaldo o justificación.</div>';
@@ -499,14 +507,61 @@ function kpi(l,v,s){return '<div class="card kpi"><div class="l">'+l+'</div><div
 function cRow(l,v,b){return '<div class="cuadre-row"'+(b?' style="font-weight:700"':'')+'><span>'+l+'</span><span class="num">'+v+'</span></div>';}
 
 /* ---------- banco ---------- */
+/* Repetidos ya guardados: mismo dia y monto, venidos de archivos distintos, en mayor cantidad que en
+   cualquiera de esos archivos. Se conserva el que tiene comprobante o justificacion; se le pasan el saldo,
+   el N de documento y los vinculos del otro, y el otro se elimina. */
+function buscarRepetidos(){
+  var idx=porMov(),g={};S.movs.forEach(function(m){(g[grupoMov(m)]=g[grupoMov(m)]||[]).push(m);});
+  var out=[];
+  Object.keys(g).forEach(function(k){
+    var ms=g[k];if(ms.length<2)return;var pa={};ms.forEach(function(m){pa[m.archivo||'?']=(pa[m.archivo||'?']||0)+1;});
+    var esperado=Math.max.apply(null,Object.keys(pa).map(function(a){return pa[a];}));
+    if(Object.keys(pa).length<2||ms.length<=esperado||cerrado(ms[0].mes))return;
+    var punt=function(m){return (idx[m.id]||[]).length*100+(m.sinDoc?50:0)+(m.saldo!=null&&m.saldo!==''?5:0)+((m.desc||'').length>34?1:0);};
+    var orden=ms.slice().sort(function(a,b){return punt(b)-punt(a);});
+    var quedan=orden.slice(0,esperado),sobran=orden.slice(esperado);
+    sobran.forEach(function(x,i){out.push({queda:quedan[i%quedan.length],sobra:x});});
+  });
+  return out;
+}
+function vRepetidos(){
+  var rs=buscarRepetidos();
+  var h='<div class="mh"><h3>Movimientos repetidos</h3><button class="x" onclick="A.cerrarModal()">×</button></div><div class="mb">';
+  if(!rs.length)return abrirModal(h+'<div class="alert a-ok">✅ No hay movimientos repetidos.</div></div>');
+  h+='<p style="margin-top:0">Estos movimientos están <b>dos veces</b> porque se subieron desde dos archivos distintos del banco (mismo día y mismo monto). Al unificar se conserva uno; se le traspasan el saldo, el N° de documento, la justificación y los comprobantes vinculados, y se elimina la copia.</p>';
+  h+='<div class="tw"><table><thead><tr><th>Fecha</th><th class="num">Monto</th><th>Se conserva</th><th>Se elimina (copia)</th></tr></thead><tbody>';
+  var idx=porMov();
+  rs.forEach(function(r){h+='<tr style="cursor:default"><td class="num">'+fFecha(r.queda.fecha)+'</td><td class="num '+(dirMov(r.queda)==='gasto'?'neg':'pos')+'">'+$$(montoMov(r.queda))+'</td><td>'+esc(r.queda.desc)+((idx[r.queda.id]||[]).length?' <span class="bdg b-ok">con comprobante</span>':'')+'<span class="sub">'+esc(r.queda.archivo||'')+'</span></td><td class="muted">'+esc(r.sobra.desc)+((idx[r.sobra.id]||[]).length?' <span class="bdg b-info">su comprobante pasa al otro</span>':'')+'<span class="sub">'+esc(r.sobra.archivo||'')+'</span></td></tr>';});
+  h+='</tbody></table></div></div><div class="mf"><button class="btn" onclick="A.cerrarModal()">Cancelar</button><button class="btn pri" id="rep-ok" onclick="A.unificar()">Unificar '+rs.length+' repetido'+(rs.length===1?'':'s')+'</button></div>';
+  abrirModal(h,true);
+}
+async function unificar(){
+  var rs=buscarRepetidos(),btn=document.getElementById('rep-ok');if(btn){btn.disabled=true;btn.textContent='Unificando…';}
+  var n=0;
+  try{
+    for(var i=0;i<rs.length;i++){
+      var q=rs[i].queda,x=rs[i].sobra,u={};
+      if((q.saldo==null||q.saldo==='')&&x.saldo!=null&&x.saldo!=='')u.saldo=x.saldo;
+      if(!/[1-9]/.test(q.ndoc||'')&&/[1-9]/.test(x.ndoc||''))u.ndoc=x.ndoc;
+      if(x.sinDoc&&!q.sinDoc){u.sinDoc=true;u.nota=x.nota||'';}
+      if(Object.keys(u).length){await ST.update(C.movs,q.id,u);Object.assign(q,u);}
+      var ds=S.docs.filter(function(d){return d.movId===x.id;});
+      for(var j=0;j<ds.length;j++){await ST.update(C.docs,ds[j].id,{movId:q.id});ds[j].movId=q.id;}
+      await ST.del(C.movs,x.id);S.movs=S.movs.filter(function(m){return m.id!==x.id;});n++;
+    }
+    cerrarModal();render();toast(n+' repetido'+(n===1?'':'s')+' unificado'+(n===1?'':'s')+'.');
+  }catch(e){render();toast('Se unificaron '+n+'; error en el resto: '+errMsg(e),true);}
+}
 function vBanco(){
   var idx=porMov(),movs=S.movs.filter(function(m){return enPer(m.mes);}).sort(ordenFecha);
   var cnt={todos:movs.length,falta:0,ok:0,nota:0};movs.forEach(function(m){var e=movEstado(m,idx);if(e==='falta'||e==='parcial')cnt.falta++;else cnt[e]++;});
   var f=S.movFiltro,lista=movs.filter(function(m){var e=movEstado(m,idx);return f==='todos'||(f==='falta'?(e==='falta'||e==='parcial'):e===f);});
   var q=S.q.toLowerCase();if(q)lista=lista.filter(function(m){return (m.desc+' '+(m.ndoc||'')+' '+montoMov(m)).toLowerCase().indexOf(q)>=0;});
   var h='<div class="sec-h"><h2>Movimientos del banco</h2>';
+  var nRep=esDueno()?buscarRepetidos().length:0;
   if(esDueno())h+='<button class="btn sm" onclick="A.autoVincular()" title="Vincula solos los comprobantes cuyo monto y fecha coinciden">⚡ Vincular automáticamente</button><label class="btn gold sm">⬆ Importar Excel de Santander<input type="file" accept=".xlsx,.xls,.csv" hidden onchange="A.importar(this)"></label>';
   h+='</div>';
+  if(nRep)h+='<div class="alert a-warn">⚠️ Hay <b>'+nRep+'</b> movimiento'+(nRep===1?'':'s')+' repetido'+(nRep===1?'':'s')+' (el mismo movimiento subido desde dos archivos distintos). <a href="#" onclick="A.verRepetidos();return false">Revisar y unificar</a></div>';
   h+='<div class="sec-h"><div class="chips">'+[['todos','Todos'],['falta','Sin respaldo'],['ok','Respaldados'],['nota','Justificados sin doc.']].map(function(c){return '<button class="chip'+(f===c[0]?' on':'')+'" onclick="A.movFiltro(\''+c[0]+'\')">'+c[1]+' ('+cnt[c[0]]+')</button>';}).join('')+'</div>'
     +'<input type="search" placeholder="Buscar descripción o monto…" value="'+esc(S.q)+'" oninput="A.buscar(this.value)" style="max-width:260px;margin-left:auto" id="q"></div>';
   if(!movs.length)return h+'<div class="tw"><div class="empty">No hay movimientos en '+esc(nomMes(S.per))+'.'+(esDueno()?'<br><br>Descarga los movimientos desde Santander (Office Banking o la web: <i>Cuentas → Movimientos → Descargar Excel</i>) y súbelos con el botón <b>Importar</b>. Si subes el mismo archivo dos veces no se duplican.':'')+'</div></div>';
@@ -594,33 +649,77 @@ function filasImport(){
   var out=[],errores=0,occ={};
   for(var r=IMP.hr+1;r<rows.length;r++){
     var row=rows[r];if(!row||!row.length)continue;
+    /* una fila con un solo texto (p. ej. "Resumen comisiones", "Saldos diarios") abre otra seccion: ahi terminan los movimientos */
+    var ne=row.filter(function(c){return String(c).trim()!=='';});
+    if(ne.length&&ne.every(function(c){return String(c).trim()===String(ne[0]).trim();})&&typeof ne[0]==='string'&&!parseFecha(ne[0],IMP.anio))break;
     var g=function(k){return inv[k]!=null?row[inv[k]]:'';};
     var fecha=parseFecha(g('fecha'),IMP.anio);if(!fecha){if(String(g('fecha')).trim()&&inv.fecha!=null)errores++;continue;}
     var cargo=0,abono=0;
     if(inv.cargo!=null||inv.abono!=null){var c=parseMonto(g('cargo')),a=parseMonto(g('abono'));cargo=isNaN(c)?0:Math.abs(c);abono=isNaN(a)?0:Math.abs(a);}
     else if(inv.monto!=null){var mo=parseMonto(g('monto'));if(isNaN(mo))continue;var t=String(g('ca')).trim().toUpperCase();if(inv.ca!=null&&t)t[0]==='C'?cargo=Math.abs(mo):abono=Math.abs(mo);else mo<0?cargo=-mo:abono=mo;}
     if(!cargo&&!abono)continue;
-    var desc=String(g('desc')||'').replace(/\s+/g,' ').trim().slice(0,300),ndoc=String(g('ndoc')||'').trim().slice(0,60),sal=parseMonto(g('saldo'));
+    var desc=String(g('desc')||'').replace(/\s+/g,' ').trim().slice(0,300),ndoc=String(g('ndoc')||'').trim().replace(/^0+$/,'').slice(0,60),sal=parseMonto(g('saldo'));
     var key=[fecha,desc,ndoc,cargo,abono,isNaN(sal)?'':sal].join('|');occ[key]=(occ[key]||0)+1;
     out.push({id:'M'+hash53(key+'#'+occ[key]),fecha:fecha,mes:fecha.slice(0,7),desc:desc||'(sin descripción)',ndoc:ndoc,cargo:cargo,abono:abono,saldo:isNaN(sal)?null:sal,orden:r,archivo:IMP.file,importado:Date.now()});
   }
   /* Cadena de saldos: cada saldo debe ser el anterior + abono - cargo. Se prueba el archivo en ambos
      sentidos (Santander lista del mas nuevo al mas antiguo) y se usa el que cuadra. */
   function quiebres(seq){var n=0;for(var i=1;i<seq.length;i++){var a=seq[i-1],b=seq[i];if(a.saldo!=null&&b.saldo!=null&&a.saldo+b.abono-b.cargo!==b.saldo)n++;}return n;}
-  var conSaldo=out.filter(function(f){return f.saldo!=null;}).length,cad=null;
+  var conSaldo=out.filter(function(f){return f.saldo!=null;}).length,cad=null,seq=out;
   if(out.length){
     var inv=out.slice().reverse(),qi=quiebres(inv),qd=quiebres(out);
     var desc=out[0].fecha>out[out.length-1].fecha||(out[0].fecha===out[out.length-1].fecha&&qi<=qd);
-    var seq=(qi!==qd)?(qi<qd?inv:out):(desc?inv:out);
+    seq=(qi!==qd)?(qi<qd?inv:out):(desc?inv:out);
     seq.forEach(function(f,i){f.cron=i;});
     if(conSaldo===out.length){var pri=seq[0],ult=seq[seq.length-1];cad={quiebres:Math.min(qi,qd),ini:pri.saldo-pri.abono+pri.cargo,fin:ult.saldo};}
   }
-  return {filas:out,errores:errores,cadena:cad};
+  /* Cartola historica de Santander: trae "Saldos diarios" (SALDO | FECHA) en vez de saldo por fila,
+     y un resumen oficial (SALDO INICIAL ... SALDO FINAL). Se usan para verificar el archivo. */
+  var diario={},oficial=null,numCart='';
+  rows.forEach(function(row,i){
+    var a=String(row[0]||'').trim().toUpperCase(),b=String(row[1]||'').trim().toUpperCase();
+    if(/^N[ÚU]MERO CARTOLA/.test(a))numCart=a.replace(/^[^:]*:\s*/,'');
+    if(a==='SALDO INICIAL'&&rows[i+1]){var v=rows[i+1].map(function(x){return parseMonto(x);});if(!isNaN(v[0])&&!isNaN(v[6]))oficial={ini:v[0],abonos:(v[1]||0)+(v[2]||0),cargos:-((v[3]||0)+(v[4]||0)+(v[5]||0)),fin:v[6]};}
+    if(a==='SALDO'&&b==='FECHA'){for(var j=i+1;j<rows.length;j++){var sv=parseMonto(rows[j][0]),fd=parseFecha(rows[j][1],IMP.anio);if(isNaN(sv)||!fd)break;diario[fd]=sv;}}
+  });
+  if(conSaldo===0&&Object.keys(diario).length&&out.length){
+    /* el saldo del dia queda en el ultimo movimiento de ese dia; verificacion dia a dia */
+    var porDia={};seq.forEach(function(f){porDia[f.fecha]=f;});
+    Object.keys(porDia).forEach(function(d){if(diario[d]!=null)porDia[d].saldo=diario[d];});
+    var dias=Object.keys(porDia).sort(),q=0,prev=null,ini=null;
+    dias.forEach(function(d){var neto=seq.filter(function(f){return f.fecha===d;}).reduce(function(s,f){return s+f.abono-f.cargo;},0);
+      if(diario[d]==null)return;if(prev==null){ini=diario[d]-neto;}else if(prev+neto!==diario[d])q++;prev=diario[d];});
+    if(ini!=null)cad={quiebres:q,ini:ini,fin:prev,diario:true};
+  }
+  var tot=null;
+  if(oficial){var ab=out.reduce(function(s,f){return s+f.abono;},0),ca=out.reduce(function(s,f){return s+f.cargo;},0);
+    tot={num:numCart,ini:oficial.ini,abonos:ab,cargos:ca,fin:oficial.fin,ok:ab===oficial.abonos&&ca===oficial.cargos&&oficial.ini+ab-ca===oficial.fin,ofAb:oficial.abonos,ofCa:oficial.cargos};}
+  return {filas:out,errores:errores,cadena:cad,oficial:tot};
+}
+/* Un mismo movimiento puede venir con otro texto segun el formato del Excel (la cartola historica corta
+   la descripcion y trae otro N de documento). Por eso, ademas del identificador exacto, se compara por
+   fecha + cargo + abono: si en el portal ya hay tantos movimientos iguales como en el archivo, no se agregan. */
+function grupoMov(m){return m.fecha+'|'+(+m.cargo||0)+'|'+(+m.abono||0);}
+function separarImport(filas,saldoFila){
+  var ex={},cnt={},grp={};S.movs.forEach(function(m){ex[m.id]=m;var k=grupoMov(m);(cnt[k]=cnt[k]||[]).push(m);});
+  filas.forEach(function(f){(grp[grupoMov(f)]=grp[grupoMov(f)]||[]).push(f);});
+  var nuevos={},mejoras=[];
+  Object.keys(grp).forEach(function(k){
+    var fs=grp[k],enPortal=(cnt[k]||[]).slice().sort(function(a,b){return seqMov(a)-seqMov(b);}),n=Math.max(0,fs.length-enPortal.length);
+    fs.filter(function(f){return !ex[f.id];}).slice(0,n).forEach(function(f){nuevos[f.id]=1;});
+    /* los que ya estaban: completar saldo y N de documento si el portal no los tiene */
+    var ya=fs.filter(function(f){return !nuevos[f.id];}).sort(function(a,b){return a.cron-b.cron;});
+    ya.forEach(function(f,i){var m=ex[f.id]||enPortal[i];if(!m||cerrado(m.mes))return;var u={};
+      if(saldoFila&&(m.saldo==null||m.saldo==='')&&f.saldo!=null)u.saldo=f.saldo;
+      if(!/[1-9]/.test(m.ndoc||'')&&/[1-9]/.test(f.ndoc||''))u.ndoc=f.ndoc;
+      if(Object.keys(u).length)mejoras.push({m:m,u:u});});
+  });
+  return {nuevos:filas.filter(function(f){return nuevos[f.id];}),mejoras:mejoras};
 }
 function vImport(){
   var hoja=IMP.hojas[IMP.hoja],rows=hoja.rows,ncol=Math.max.apply(null,rows.slice(0,60).map(function(r){return r.length;}).concat([1]));
-  var p=filasImport(),existentes={};S.movs.forEach(function(m){existentes[m.id]=1;});
-  var nuevos=p.filas.filter(function(f){return !existentes[f.id];}),rep=p.filas.length-nuevos.length,bloq=nuevos.filter(function(f){return cerrado(f.mes);}).length;
+  var p=filasImport(),sp=separarImport(p.filas,!!(p.cadena&&!p.cadena.diario));
+  var nuevos=sp.nuevos,rep=p.filas.length-nuevos.length,bloq=nuevos.filter(function(f){return cerrado(f.mes);}).length;
   var h='<div class="mh"><h3>Importar movimientos · '+esc(IMP.file)+'</h3><button class="x" onclick="A.cerrarModal()">×</button></div><div class="mb">';
   h+='<div class="grid g3" style="margin-bottom:12px">';
   if(IMP.hojas.length>1)h+='<div><label class="f">Hoja</label><select onchange="A.impHoja(this.value)">'+IMP.hojas.map(function(s,i){return '<option value="'+i+'"'+(i===IMP.hoja?' selected':'')+'>'+esc(s.n)+'</option>';}).join('')+'</select></div>';
@@ -633,19 +732,20 @@ function vImport(){
   rows.slice(Math.max(0,IMP.hr),Math.max(0,IMP.hr)+9).forEach(function(r,i){h+='<tr style="cursor:default'+(i===0&&IMP.hr>=0?';font-weight:700;background:#f8f9fc':'')+'">';for(var c=0;c<ncol;c++){var v=r[c];h+='<td>'+esc(v instanceof Date?ymd(new Date(v.getTime()+12*3600e3)):v)+'</td>';}h+='</tr>';});
   h+='</tbody></table></div>';
   var tc=0,ta=0;nuevos.forEach(function(f){tc+=f.cargo;ta+=f.abono;});
-  if(p.cadena)h+=p.cadena.quiebres===0?'<div class="alert a-ok">✅ Los saldos cuadran fila a fila: saldo inicial <b>'+$$(p.cadena.ini)+'</b> → saldo final <b>'+$$(p.cadena.fin)+'</b>. No falta ningún movimiento en este archivo.</div>':'<div class="alert a-warn">⚠️ Hay '+p.cadena.quiebres+' salto'+(p.cadena.quiebres===1?'':'s')+' en los saldos: puede faltar algún movimiento en el archivo o alguna columna está mal asignada.</div>';
-  h+=p.filas.length?'<div class="alert a-info">Se encontraron <b>'+p.filas.length+'</b> movimientos'+(p.filas.length?' (del '+fFecha(p.filas.map(function(f){return f.fecha;}).sort()[0])+' al '+fFecha(p.filas.map(function(f){return f.fecha;}).sort().pop())+')':'')+'. Nuevos: <b>'+nuevos.length+'</b> · cargos '+$$(tc)+' · abonos '+$$(ta)+(rep?'<br>'+rep+' ya estaban importados y se omiten.':'')+(bloq?'<br>⚠️ '+bloq+' pertenecen a meses cerrados y no se importarán.':'')+(p.errores?'<br>'+p.errores+' filas con fecha ilegible se omiten.':'')+'</div>':'<div class="alert a-warn">No se reconocen movimientos. Indica qué columna es la <b>Fecha</b> y cuáles son <b>Cargo</b>/<b>Abono</b> (o <b>Monto</b>).</div>';
-  h+='</div><div class="mf"><button class="btn" onclick="A.cerrarModal()">Cancelar</button><button class="btn pri" id="imp-ok" onclick="A.impOk()"'+(nuevos.length-bloq>0?'':' disabled')+'>Importar '+(nuevos.length-bloq)+' movimientos</button></div>';
+  if(p.oficial)h+=p.oficial.ok?'<div class="alert a-ok">✅ Cuadra con el resumen oficial de la cartola'+(p.oficial.num?' N° '+esc(p.oficial.num):'')+': saldo inicial <b>'+$$(p.oficial.ini)+'</b> + abonos <b>'+$$(p.oficial.abonos)+'</b> − cargos <b>'+$$(p.oficial.cargos)+'</b> = saldo final <b>'+$$(p.oficial.fin)+'</b>.</div>':'<div class="alert a-bad">⚠️ No cuadra con el resumen oficial de la cartola: el banco informa abonos '+$$(p.oficial.ofAb)+' y cargos '+$$(p.oficial.ofCa)+', y en el archivo se leyeron '+$$(p.oficial.abonos)+' y '+$$(p.oficial.cargos)+'. Revisa las columnas antes de importar.</div>';
+  if(p.cadena&&!p.oficial)h+=p.cadena.quiebres===0?'<div class="alert a-ok">✅ Los saldos cuadran'+(p.cadena.diario?' día a día':' fila a fila')+': saldo inicial <b>'+$$(p.cadena.ini)+'</b> → saldo final <b>'+$$(p.cadena.fin)+'</b>. No falta ningún movimiento en este archivo.</div>':'<div class="alert a-warn">⚠️ Hay '+p.cadena.quiebres+' salto'+(p.cadena.quiebres===1?'':'s')+' en los saldos: puede faltar algún movimiento en el archivo o alguna columna está mal asignada.</div>';
+  h+=p.filas.length?'<div class="alert a-info">Se encontraron <b>'+p.filas.length+'</b> movimientos'+(p.filas.length?' (del '+fFecha(p.filas.map(function(f){return f.fecha;}).sort()[0])+' al '+fFecha(p.filas.map(function(f){return f.fecha;}).sort().pop())+')':'')+'. Nuevos: <b>'+nuevos.length+'</b> · cargos '+$$(tc)+' · abonos '+$$(ta)+(rep?'<br>'+rep+' ya estaban en el portal (aunque vengan con otro texto) y se omiten.':'')+(sp.mejoras.length?'<br>Se completarán datos (saldo o N° de documento) en '+sp.mejoras.length+' movimiento'+(sp.mejoras.length===1?'':'s')+' que ya estaban.':'')+(bloq?'<br>⚠️ '+bloq+' pertenecen a meses cerrados y no se importarán.':'')+(p.errores?'<br>'+p.errores+' filas con fecha ilegible se omiten.':'')+'</div>':'<div class="alert a-warn">No se reconocen movimientos. Indica qué columna es la <b>Fecha</b> y cuáles son <b>Cargo</b>/<b>Abono</b> (o <b>Monto</b>).</div>';
+  h+='</div><div class="mf"><button class="btn" onclick="A.cerrarModal()">Cancelar</button><button class="btn pri" id="imp-ok" onclick="A.impOk()"'+(nuevos.length-bloq>0||sp.mejoras.length?'':' disabled')+'>'+(nuevos.length-bloq>0?'Importar '+(nuevos.length-bloq)+' movimientos':sp.mejoras.length?'Completar datos':'Nada nuevo para importar')+'</button></div>';
   abrirModal(h,true);
 }
 async function impOk(){
   var btn=document.getElementById('imp-ok');btn.disabled=true;btn.textContent='Importando…';
-  var ex={};S.movs.forEach(function(m){ex[m.id]=1;});
-  var nuevos=filasImport().filas.filter(function(f){return !ex[f.id]&&!cerrado(f.mes);});
+  var pi=filasImport(),sp=separarImport(pi.filas,!!(pi.cadena&&!pi.cadena.diario)),nuevos=sp.nuevos.filter(function(f){return !cerrado(f.mes);});
   try{await ST.setMany(C.movs,nuevos);S.movs=S.movs.concat(nuevos);
+    for(var i=0;i<sp.mejoras.length;i++){var mj=sp.mejoras[i];await ST.update(C.movs,mj.m.id,mj.u);Object.assign(mj.m,mj.u);}
     var meses={};nuevos.forEach(function(f){meses[f.mes]=1;});var ms=Object.keys(meses).sort();
     if(ms.length&&!enPer(ms[ms.length-1]))S.per=ms[ms.length-1];
-    cerrarModal();S.tab='banco';S.movFiltro='todos';render();toast(nuevos.length+' movimientos importados.');
+    cerrarModal();S.tab='banco';S.movFiltro='todos';render();toast(nuevos.length+' movimientos importados'+(sp.mejoras.length?' y '+sp.mejoras.length+' completados':'')+'.');
   }catch(e){btn.disabled=false;btn.textContent='Reintentar';toast('Error al importar: '+errMsg(e),true);}
 }
 
@@ -943,6 +1043,7 @@ var A={
     try{var rec={nombre:nom,email:em,agregado:Date.now()};await ST.set(C.lectores,uid,rec);rec.id=uid;S.lectores=S.lectores.filter(function(l){return l.id!==uid;}).concat([rec]);render();toast('Acceso de solo lectura otorgado a '+nom+'.');}catch(e){toast(errMsg(e),true);}},
   quitarLector:async function(uid){if(!soloDueno()||!confirm('¿Quitar el acceso? Esa persona ya no podrá ver nada.'))return;try{await ST.del(C.lectores,uid);S.lectores=S.lectores.filter(function(l){return l.id!==uid;});render();toast('Acceso quitado.');}catch(e){toast(errMsg(e),true);}},
   aceptarInv:aceptarInv,
+  verRepetidos:function(){if(soloDueno())vRepetidos();},unificar:function(){if(soloDueno())unificar();},
   crearInv:async function(){if(!soloDueno())return;var nom=document.getElementById('ac-nom').value.trim();if(!nom)return toast('Escribe el nombre de la persona.',true);
     var a=crypto.getRandomValues(new Uint8Array(24)),code=btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
     var rec={nombre:nom.slice(0,80),creado:Date.now(),expira:Date.now()+7*864e5,usado:false};
